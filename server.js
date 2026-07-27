@@ -116,6 +116,11 @@ function seedDB() {
     { id: "u_mgr", username: "manager", name: "Inventory Manager", role: "manager", passwordHash: bcrypt.hashSync("manager123", 8) },
   ];
 
+  const dispatchers = [
+    { id: "disp_1", name: "Marco Rossi", phone: "+39 06 5551234", email: "marco.rossi@dispatch.example", vehicle: "Van — AB123CD", notes: "" },
+    { id: "disp_2", name: "Elena Popescu", phone: "+40 21 5559876", email: "elena.popescu@dispatch.example", vehicle: "Truck — XY456ZZ", notes: "" },
+  ];
+
   const productSeeds = [
     { sku: "SKU-1001", barcode: "8901001", name: "UltraBook 14", brand: "Apple", category: "Laptop", unit: "pcs", purchasePrice: 950, sellingPrice: 1199, currentStock: 6, minStock: 3, warehouseId: "wh_a", billNumber: "2222", rating: 5, warranty: "12 months" },
     { sku: "SKU-1002", barcode: "8901002", name: "ProBook X5", brand: "Acer", category: "Laptop", unit: "pcs", purchasePrice: 700, sellingPrice: 899, currentStock: 3, minStock: 4, warehouseId: "wh_a", billNumber: "76786", rating: 4, warranty: "24 months" },
@@ -143,6 +148,7 @@ function seedDB() {
     users,
     warehouses,
     suppliers,
+    dispatchers,
     products,
     transactions: [],
     purchaseOrders: [],
@@ -159,6 +165,7 @@ function loadDB() {
   }
   const loaded = JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
   if (!loaded.invites) loaded.invites = []; // migrate older db.json files
+  if (!loaded.dispatchers) loaded.dispatchers = []; // migrate older db.json files
   return loaded;
 }
 
@@ -422,6 +429,61 @@ app.post("/api/products", authenticate, requireRole("admin"), (req, res) => {
   res.status(201).json(product);
 });
 
+app.post("/api/products/bulk-import", authenticate, requireRole("admin"), (req, res) => {
+  const rows = Array.isArray(req.body?.products) ? req.body.products : [];
+  if (rows.length === 0) return res.status(400).json({ error: "No rows to import" });
+  const created = [];
+  const errors = [];
+  rows.forEach((body, idx) => {
+    if (!body.name || !body.category) {
+      errors.push({ row: idx + 1, error: "name and category are required" });
+      return;
+    }
+    const product = {
+      id: uid("prod"),
+      sku: body.sku || uid("SKU").toUpperCase(),
+      barcode: body.barcode || String(Math.floor(Math.random() * 9000000) + 1000000),
+      name: body.name,
+      description: body.description || "",
+      brand: body.brand || "Generic",
+      category: body.category,
+      supplierId: body.supplierId || null,
+      unit: body.unit || "pcs",
+      purchasePrice: Number(body.purchasePrice) || 0,
+      sellingPrice: Number(body.sellingPrice) || 0,
+      currentStock: Number(body.currentStock) || 0,
+      minStock: Number(body.minStock) || 1,
+      warehouseId: body.warehouseId || db.warehouses[0]?.id || null,
+      billNumber: body.billNumber || "",
+      rating: Number(body.rating) || 0,
+      warranty: body.warranty || "",
+      expiryDate: body.expiryDate || null,
+      status: "Available",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    recomputeStatus(product);
+    db.products.push(product);
+    created.push(product);
+  });
+  if (created.length > 0) {
+    logActivity(req.user.id, `Bulk imported ${created.length} product(s)`);
+    saveDB(db);
+  }
+  res.status(201).json({ createdCount: created.length, errorCount: errors.length, errors, created });
+});
+
+app.post("/api/products/bulk-delete", authenticate, requireRole("admin"), (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  if (ids.length === 0) return res.status(400).json({ error: "No product ids provided" });
+  const idSet = new Set(ids);
+  const toDelete = db.products.filter((p) => idSet.has(p.id));
+  db.products = db.products.filter((p) => !idSet.has(p.id));
+  logActivity(req.user.id, `Bulk deleted ${toDelete.length} product(s)`);
+  saveDB(db);
+  res.json({ success: true, deletedCount: toDelete.length });
+});
+
 app.put("/api/products/:id", authenticate, requireRole("admin"), (req, res) => {
   const product = db.products.find((p) => p.id === req.params.id);
   if (!product) return res.status(404).json({ error: "Product not found" });
@@ -444,6 +506,8 @@ app.delete("/api/products/:id", authenticate, requireRole("admin"), (req, res) =
 // INVENTORY ACTIONS (admin + manager)
 // ---------------------------------------------------------------
 function recordTransaction(type, product, payload, userId) {
+  const user = db.users.find((u) => u.id === userId);
+  const dispatcher = payload.dispatcherId ? db.dispatchers.find((d) => d.id === payload.dispatcherId) : null;
   const tx = {
     id: uid("tx"),
     type,
@@ -453,7 +517,12 @@ function recordTransaction(type, product, payload, userId) {
     fromWarehouseId: payload.fromWarehouseId || null,
     toWarehouseId: payload.toWarehouseId || null,
     note: payload.note || "",
+    price: payload.price !== undefined ? Number(payload.price) || 0 : null,
+    customerName: payload.customerName || "",
+    dispatcherId: dispatcher ? dispatcher.id : null,
+    dispatcherName: dispatcher ? dispatcher.name : "",
     userId,
+    userName: user ? user.name : "Unknown",
     createdAt: new Date().toISOString(),
   };
   db.transactions.unshift(tx);
@@ -523,8 +592,32 @@ app.post("/api/inventory/:id/return", authenticate, requireRole("admin", "manage
   res.json({ product, transaction: tx });
 });
 
+app.post("/api/inventory/:id/sale", authenticate, requireRole("admin", "manager"), (req, res) => {
+  const product = db.products.find((p) => p.id === req.params.id);
+  if (!product) return res.status(404).json({ error: "Product not found" });
+  const qty = Number(req.body.quantity) || 0;
+  if (qty <= 0) return res.status(400).json({ error: "Quantity must be greater than 0" });
+  if (qty > product.currentStock) return res.status(400).json({ error: "Not enough stock available" });
+  product.currentStock -= qty;
+  recomputeStatus(product);
+  const price = req.body.price !== undefined && req.body.price !== "" ? Number(req.body.price) : product.sellingPrice;
+  const tx = recordTransaction("sale", product, { ...req.body, price }, req.user.id);
+  logActivity(req.user.id, `Sold ${qty} of "${product.name}"${req.body.customerName ? ` to ${req.body.customerName}` : ""}`);
+  saveDB(db);
+  res.json({ product, transaction: tx });
+});
+
 app.get("/api/transactions", authenticate, (req, res) => {
-  res.json(db.transactions.slice(0, 200));
+  let items = [...db.transactions];
+  const { type, from, to, productId, userId, warehouseId } = req.query;
+  if (type) items = items.filter((t) => t.type === type);
+  if (productId) items = items.filter((t) => t.productId === productId);
+  if (userId) items = items.filter((t) => t.userId === userId);
+  if (warehouseId) items = items.filter((t) => t.fromWarehouseId === warehouseId || t.toWarehouseId === warehouseId);
+  if (from) items = items.filter((t) => new Date(t.createdAt) >= new Date(from));
+  if (to) items = items.filter((t) => new Date(t.createdAt) <= new Date(`${to}T23:59:59.999Z`));
+  const limit = Math.min(Number(req.query.limit) || 200, 2000);
+  res.json(items.slice(0, limit));
 });
 
 // ---------------------------------------------------------------
@@ -585,6 +678,44 @@ app.put("/api/suppliers/:id", authenticate, requireRole("admin"), (req, res) => 
 
 app.delete("/api/suppliers/:id", authenticate, requireRole("admin"), (req, res) => {
   db.suppliers = db.suppliers.filter((s) => s.id !== req.params.id);
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// ---------------------------------------------------------------
+// DISPATCHERS
+// ---------------------------------------------------------------
+app.get("/api/dispatchers", authenticate, (req, res) => res.json(db.dispatchers));
+
+app.post("/api/dispatchers", authenticate, requireRole("admin"), (req, res) => {
+  if (!req.body?.name) return res.status(400).json({ error: "Name is required" });
+  const dispatcher = {
+    id: uid("disp"),
+    name: req.body.name,
+    phone: req.body.phone || "",
+    email: req.body.email || "",
+    vehicle: req.body.vehicle || "",
+    notes: req.body.notes || "",
+  };
+  db.dispatchers.push(dispatcher);
+  logActivity(req.user.id, `Added dispatcher "${dispatcher.name}"`);
+  saveDB(db);
+  res.status(201).json(dispatcher);
+});
+
+app.put("/api/dispatchers/:id", authenticate, requireRole("admin"), (req, res) => {
+  const dispatcher = db.dispatchers.find((d) => d.id === req.params.id);
+  if (!dispatcher) return res.status(404).json({ error: "Dispatcher not found" });
+  Object.assign(dispatcher, req.body);
+  logActivity(req.user.id, `Updated dispatcher "${dispatcher.name}"`);
+  saveDB(db);
+  res.json(dispatcher);
+});
+
+app.delete("/api/dispatchers/:id", authenticate, requireRole("admin"), (req, res) => {
+  const dispatcher = db.dispatchers.find((d) => d.id === req.params.id);
+  db.dispatchers = db.dispatchers.filter((d) => d.id !== req.params.id);
+  logActivity(req.user.id, `Deleted dispatcher "${dispatcher ? dispatcher.name : req.params.id}"`);
   saveDB(db);
   res.json({ success: true });
 });
@@ -708,16 +839,49 @@ app.get("/api/activity-logs", authenticate, requireRole("admin"), (req, res) => 
 // ---------------------------------------------------------------
 // REPORTS (CSV export)
 // ---------------------------------------------------------------
+function csvCell(v) {
+  const s = v === null || v === undefined ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 app.get("/api/reports/inventory.csv", authenticate, (req, res) => {
-  const header = "SKU,Name,Brand,Category,Warehouse,Stock,MinStock,PurchasePriceEUR,SellingPriceEUR,Status\n";
-  const rows = db.products
+  const { warehouseId, category, from, to } = req.query;
+  let items = [...db.products];
+  if (warehouseId) items = items.filter((p) => p.warehouseId === warehouseId);
+  if (category) items = items.filter((p) => p.category.toLowerCase() === String(category).toLowerCase());
+  if (from) items = items.filter((p) => new Date(p.updatedAt || p.createdAt) >= new Date(from));
+  if (to) items = items.filter((p) => new Date(p.updatedAt || p.createdAt) <= new Date(`${to}T23:59:59.999Z`));
+
+  const header = "SKU,Name,Brand,Category,Warehouse,Stock,MinStock,PurchasePriceEUR,SellingPriceEUR,Status,LastUpdated\n";
+  const rows = items
     .map((p) => {
       const wh = db.warehouses.find((w) => w.id === p.warehouseId);
-      return [p.sku, p.name, p.brand, p.category, wh ? wh.name : "", p.currentStock, p.minStock, p.purchasePrice, p.sellingPrice, p.status].join(",");
+      return [p.sku, p.name, p.brand, p.category, wh ? wh.name : "", p.currentStock, p.minStock, p.purchasePrice, p.sellingPrice, p.status, p.updatedAt]
+        .map(csvCell)
+        .join(",");
     })
     .join("\n");
   res.setHeader("Content-Type", "text/csv");
   res.setHeader("Content-Disposition", "attachment; filename=inventory-report.csv");
+  res.send(header + rows);
+});
+
+app.get("/api/reports/transactions.csv", authenticate, (req, res) => {
+  const { from, to, type, warehouseId } = req.query;
+  let items = [...db.transactions];
+  if (type) items = items.filter((t) => t.type === type);
+  if (warehouseId) items = items.filter((t) => t.fromWarehouseId === warehouseId || t.toWarehouseId === warehouseId);
+  if (from) items = items.filter((t) => new Date(t.createdAt) >= new Date(from));
+  if (to) items = items.filter((t) => new Date(t.createdAt) <= new Date(`${to}T23:59:59.999Z`));
+
+  const header = "Date,Type,Product,Quantity,PriceEUR,Customer,Dispatcher,User,Note\n";
+  const rows = items
+    .map((t) => [t.createdAt, t.type, t.productName, t.quantity, t.price ?? "", t.customerName || "", t.dispatcherName || "", t.userName || "", t.note || ""]
+      .map(csvCell)
+      .join(","))
+    .join("\n");
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", "attachment; filename=transactions-report.csv");
   res.send(header + rows);
 });
 
