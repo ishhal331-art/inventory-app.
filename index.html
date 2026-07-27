@@ -8,7 +8,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background:#0f1220; }
@@ -33,7 +32,7 @@ const { useState, useEffect, useMemo, useRef, createContext, useContext } = Reac
 // ---------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------
-const API_BASE = window.__INVENTORY_API__ || "https://inventory-app-130s.onrender.com";
+const API_BASE = window.__INVENTORY_API__ || "https://inventory-app-130s.onrender.com/api";
 const CATEGORY_COLORS = { Laptop:"#ec4899", Mouse:"#8b5cf6", Watch:"#10b981", Mobile:"#d946ef", Headphone:"#f59e0b" };
 
 function eur(n) {
@@ -70,28 +69,16 @@ function useApi(token) {
       createProduct: (data) => call("/products", { method: "POST", body: data }),
       updateProduct: (id, data) => call(`/products/${id}`, { method: "PUT", body: data }),
       deleteProduct: (id) => call(`/products/${id}`, { method: "DELETE" }),
-      bulkImportProducts: (products) => call("/products/bulk-import", { method: "POST", body: { products } }),
-      bulkDeleteProducts: (ids) => call("/products/bulk-delete", { method: "POST", body: { ids } }),
       stockAction: (id, action, data) => call(`/inventory/${id}/${action}`, { method: "POST", body: data }),
       warehouses: () => call("/warehouses"),
-      createWarehouse: (data) => call("/warehouses", { method: "POST", body: data }),
-      updateWarehouse: (id, data) => call(`/warehouses/${id}`, { method: "PUT", body: data }),
-      deleteWarehouse: (id) => call(`/warehouses/${id}`, { method: "DELETE" }),
       suppliers: () => call("/suppliers"),
-      createSupplier: (data) => call("/suppliers", { method: "POST", body: data }),
-      updateSupplier: (id, data) => call(`/suppliers/${id}`, { method: "PUT", body: data }),
-      deleteSupplier: (id) => call(`/suppliers/${id}`, { method: "DELETE" }),
-      dispatchers: () => call("/dispatchers"),
-      createDispatcher: (data) => call("/dispatchers", { method: "POST", body: data }),
-      updateDispatcher: (id, data) => call(`/dispatchers/${id}`, { method: "PUT", body: data }),
-      deleteDispatcher: (id) => call(`/dispatchers/${id}`, { method: "DELETE" }),
       purchaseOrders: () => call("/purchase-orders"),
       createPO: (data) => call("/purchase-orders", { method: "POST", body: data }),
       approvePO: (id) => call(`/purchase-orders/${id}/approve`, { method: "PUT" }),
       receivePO: (id) => call(`/purchase-orders/${id}/receive`, { method: "PUT" }),
       notifications: () => call("/notifications"),
       activityLogs: () => call("/activity-logs"),
-      transactions: (qs = "") => call(`/transactions${qs}`),
+      transactions: () => call("/transactions"),
     };
   }, [token]);
 }
@@ -423,7 +410,7 @@ function ErrorBox({ msg }) {
 // ---------------------------------------------------------------------
 // Products page
 // ---------------------------------------------------------------------
-function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, bump }) {
+function Products({ api, user, warehouses, suppliers, refreshFlag, bump }) {
   const [products, setProducts] = useState([]);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -431,71 +418,20 @@ function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, 
   const [showAdd, setShowAdd] = useState(false);
   const [stockModal, setStockModal] = useState(null); // {product, action}
   const [editProduct, setEditProduct] = useState(null);
-  const [selected, setSelected] = useState({}); // { [id]: true }
-  const [importResult, setImportResult] = useState(null);
-  const [importError, setImportError] = useState("");
-  const fileInputRef = useRef(null);
 
   function load() {
     const qs = [];
     if (search) qs.push(`search=${encodeURIComponent(search)}`);
     if (statusFilter) qs.push(`status=${encodeURIComponent(statusFilter)}`);
-    api.products(qs.length ? `?${qs.join("&")}` : "").then(list => { setProducts(list); setSelected({}); }).catch(e=>setError(e.message));
+    api.products(qs.length ? `?${qs.join("&")}` : "").then(setProducts).catch(e=>setError(e.message));
   }
   useEffect(load, [search, statusFilter, refreshFlag]);
 
   const isAdmin = user.role === "admin";
-  const selectedIds = Object.keys(selected).filter(id => selected[id]);
-  const allSelected = products.length > 0 && selectedIds.length === products.length;
-
-  function toggleOne(id) { setSelected(s => ({ ...s, [id]: !s[id] })); }
-  function toggleAll() {
-    if (allSelected) setSelected({});
-    else setSelected(Object.fromEntries(products.map(p => [p.id, true])));
-  }
 
   async function handleDelete(p) {
     if (!confirm(`Delete "${p.name}"? This cannot be undone.`)) return;
     try { await api.deleteProduct(p.id); load(); bump(); } catch (e) { alert(e.message); }
-  }
-
-  async function handleBulkDelete() {
-    if (selectedIds.length === 0) return;
-    if (!confirm(`Delete ${selectedIds.length} selected product(s)? This cannot be undone.`)) return;
-    try { await api.bulkDeleteProducts(selectedIds); load(); bump(); } catch (e) { alert(e.message); }
-  }
-
-  function handleImportFile(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    setImportError(""); setImportResult(null);
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: async (res) => {
-        try {
-          const rows = res.data.map(r => ({
-            name: r.name || r.Name,
-            brand: r.brand || r.Brand,
-            category: r.category || r.Category,
-            sku: r.sku || r.SKU,
-            barcode: r.barcode || r.Barcode,
-            unit: r.unit || r.Unit,
-            purchasePrice: r.purchasePrice || r.PurchasePrice || r.PurchasePriceEUR,
-            sellingPrice: r.sellingPrice || r.SellingPrice || r.SellingPriceEUR,
-            currentStock: r.currentStock || r.Stock,
-            minStock: r.minStock || r.MinStock,
-            warehouseId: r.warehouseId,
-            supplierId: r.supplierId,
-          }));
-          const result = await api.bulkImportProducts(rows);
-          setImportResult(result);
-          load(); bump();
-        } catch (err) { setImportError(err.message); }
-        if (fileInputRef.current) fileInputRef.current.value = "";
-      },
-      error: (err) => setImportError(err.message),
-    });
   }
 
   return (
@@ -503,7 +439,7 @@ function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold">Products</h2>
-          <p className="text-slate-400 text-sm">{products.length} items{selectedIds.length>0 ? ` · ${selectedIds.length} selected` : ""}</p>
+          <p className="text-slate-400 text-sm">{products.length} items</p>
         </div>
         <div className="flex gap-2 items-center flex-wrap">
           <input placeholder="Search name / SKU / barcode…" value={search} onChange={e=>setSearch(e.target.value)}
@@ -512,33 +448,18 @@ function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, 
             <option value="">All Status</option>
             <option>Available</option><option>Out of Stock</option><option>Damaged</option><option>Return</option>
           </select>
-          <a href={`${API_BASE}/reports/inventory.csv`} target="_blank" className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm hover:border-emerald-400">⬇ Export CSV</a>
-          {isAdmin && selectedIds.length > 0 && (
-            <button onClick={handleBulkDelete} className="px-3 py-2 rounded-lg bg-rose-500/15 text-rose-400 text-sm">Delete {selectedIds.length} selected</button>
-          )}
           {isAdmin && (
-            <>
-              <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleImportFile} />
-              <button onClick={()=>fileInputRef.current?.click()} className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm hover:border-emerald-400">⬆ Import CSV</button>
-              <button onClick={()=>setShowAdd(true)} className="px-4 py-2 rounded-lg text-sm font-medium text-white" style={{ background: "linear-gradient(135deg,#22c55e,#06b6d4)" }}>+ Add Product</button>
-            </>
+            <button onClick={()=>setShowAdd(true)} className="px-4 py-2 rounded-lg text-sm font-medium text-white" style={{ background: "linear-gradient(135deg,#22c55e,#06b6d4)" }}>+ Add Product</button>
           )}
         </div>
       </div>
 
       {error && <ErrorBox msg={error} />}
-      {importError && <ErrorBox msg={importError} />}
-      {importResult && (
-        <div className="glass border border-emerald-500/30 rounded-lg p-3 text-sm text-emerald-300">
-          Imported {importResult.createdCount} product(s).{importResult.errorCount > 0 && ` ${importResult.errorCount} row(s) skipped (missing name/category).`}
-        </div>
-      )}
 
       <div className="glass border border-white/10 rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-slate-400 border-b border-white/10">
-              {isAdmin && <th className="p-3 w-8"><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>}
               <th className="p-3">SKU</th><th className="p-3">Name</th><th className="p-3">Brand</th>
               <th className="p-3">Category</th><th className="p-3">Stock</th><th className="p-3">Price</th>
               <th className="p-3">Status</th><th className="p-3">Actions</th>
@@ -547,7 +468,6 @@ function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, 
           <tbody>
             {products.map(p => (
               <tr key={p.id} className="border-b border-white/5 hover:bg-white/[0.03]">
-                {isAdmin && <td className="p-3"><input type="checkbox" checked={!!selected[p.id]} onChange={()=>toggleOne(p.id)} /></td>}
                 <td className="p-3 text-slate-400">{p.sku}</td>
                 <td className="p-3 font-medium">{p.name}</td>
                 <td className="p-3">{p.brand}</td>
@@ -559,7 +479,6 @@ function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, 
                   <div className="flex gap-1 flex-wrap">
                     <button onClick={()=>setStockModal({product:p, action:"stock-in"})} className="px-2 py-1 rounded bg-emerald-500/15 text-emerald-400 text-xs">+ In</button>
                     <button onClick={()=>setStockModal({product:p, action:"stock-out"})} className="px-2 py-1 rounded bg-sky-500/15 text-sky-400 text-xs">- Out</button>
-                    <button onClick={()=>setStockModal({product:p, action:"sale"})} className="px-2 py-1 rounded bg-teal-500/15 text-teal-300 text-xs">💰 Sale</button>
                     <button onClick={()=>setStockModal({product:p, action:"transfer"})} className="px-2 py-1 rounded bg-purple-500/15 text-purple-300 text-xs">⇄</button>
                     <button onClick={()=>setStockModal({product:p, action:"damage"})} className="px-2 py-1 rounded bg-orange-500/15 text-orange-300 text-xs">Damage</button>
                     <button onClick={()=>setStockModal({product:p, action:"return"})} className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 text-xs">Return</button>
@@ -569,14 +488,14 @@ function Products({ api, user, warehouses, suppliers, dispatchers, refreshFlag, 
                 </td>
               </tr>
             ))}
-            {products.length===0 && <tr><td colSpan={isAdmin?9:8} className="p-6 text-center text-slate-500">No products found.</td></tr>}
+            {products.length===0 && <tr><td colSpan="8" className="p-6 text-center text-slate-500">No products found.</td></tr>}
           </tbody>
         </table>
       </div>
 
       {showAdd && <ProductForm api={api} warehouses={warehouses} suppliers={suppliers} onClose={()=>setShowAdd(false)} onSaved={()=>{setShowAdd(false); load(); bump();}} />}
       {editProduct && <ProductForm api={api} warehouses={warehouses} suppliers={suppliers} product={editProduct} onClose={()=>setEditProduct(null)} onSaved={()=>{setEditProduct(null); load(); bump();}} />}
-      {stockModal && <StockActionModal api={api} {...stockModal} warehouses={warehouses} dispatchers={dispatchers} onClose={()=>setStockModal(null)} onDone={()=>{setStockModal(null); load(); bump();}} />}
+      {stockModal && <StockActionModal api={api} {...stockModal} warehouses={warehouses} onClose={()=>setStockModal(null)} onDone={()=>{setStockModal(null); load(); bump();}} />}
     </div>
   );
 }
@@ -640,26 +559,18 @@ function ProductForm({ api, product, warehouses, suppliers, onClose, onSaved }) 
   );
 }
 
-function StockActionModal({ api, product, action, warehouses, dispatchers, onClose, onDone }) {
+function StockActionModal({ api, product, action, warehouses, onClose, onDone }) {
   const [quantity, setQuantity] = useState(1);
   const [toWarehouseId, setToWarehouseId] = useState(warehouses[0]?.id || "");
   const [note, setNote] = useState("");
-  const [price, setPrice] = useState(product.sellingPrice);
-  const [customerName, setCustomerName] = useState("");
-  const [dispatcherId, setDispatcherId] = useState("");
   const [error, setError] = useState("");
-  const titles = { "stock-in":"Stock In", "stock-out":"Stock Out", "sale":"Record Sale", "transfer":"Transfer Stock", "damage":"Report Damaged", "return":"Process Return" };
+  const titles = { "stock-in":"Stock In", "stock-out":"Stock Out", "transfer":"Transfer Stock", "damage":"Report Damaged", "return":"Process Return" };
 
   async function submit(e) {
     e.preventDefault();
     try {
       const payload = { quantity: Number(quantity), note };
       if (action === "transfer") payload.toWarehouseId = toWarehouseId;
-      if (action === "sale") {
-        payload.price = Number(price);
-        payload.customerName = customerName;
-        if (dispatcherId) payload.dispatcherId = dispatcherId;
-      }
       await api.stockAction(product.id, action, payload);
       onDone();
     } catch (err) { setError(err.message); }
@@ -677,18 +588,6 @@ function StockActionModal({ api, product, action, warehouses, dispatchers, onClo
             </select>
           </Field>
         )}
-        {action === "sale" && (
-          <>
-            <Field label="Sale Price (€ per unit)"><input type="number" step="0.01" min="0" className={inputCls} value={price} onChange={e=>setPrice(e.target.value)} /></Field>
-            <Field label="Customer Name (optional)"><input className={inputCls} value={customerName} onChange={e=>setCustomerName(e.target.value)} /></Field>
-            <Field label="Dispatcher (optional)">
-              <select className={inputCls} value={dispatcherId} onChange={e=>setDispatcherId(e.target.value)}>
-                <option value="">— None —</option>
-                {(dispatchers||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-            </Field>
-          </>
-        )}
         <Field label="Note (optional)"><input className={inputCls} value={note} onChange={e=>setNote(e.target.value)} /></Field>
         {error && <div className="text-rose-400 text-xs mb-2">{error}</div>}
         <div className="flex justify-end gap-2 mt-3">
@@ -705,13 +604,7 @@ function StockActionModal({ api, product, action, warehouses, dispatchers, onClo
 // ---------------------------------------------------------------------
 function Warehouses({ api, user, warehouses, reload }) {
   const [showAdd, setShowAdd] = useState(false);
-  const [editWh, setEditWh] = useState(null);
   const isAdmin = user.role === "admin";
-
-  async function handleDelete(w) {
-    if (!confirm(`Delete "${w.name}"? This cannot be undone.`)) return;
-    try { await api.deleteWarehouse(w.id); reload(); } catch (e) { alert(e.message); }
-  }
 
   return (
     <div className="fade-in space-y-4">
@@ -725,39 +618,27 @@ function Warehouses({ api, user, warehouses, reload }) {
             <div className="text-lg font-semibold">{w.name}</div>
             <div className="text-sm text-slate-400">{w.location}</div>
             <div className="text-xs text-slate-500 mt-2">Capacity: {w.capacity} units</div>
-            {isAdmin && (
-              <div className="flex gap-2 mt-3">
-                <button onClick={()=>setEditWh(w)} className="px-2 py-1 rounded bg-white/10 text-xs">Edit</button>
-                <button onClick={()=>handleDelete(w)} className="px-2 py-1 rounded bg-rose-500/15 text-rose-400 text-xs">Delete</button>
-              </div>
-            )}
           </div>
         ))}
       </div>
       {showAdd && (
         <Modal title="Add Warehouse" onClose={()=>setShowAdd(false)}>
-          <WarehouseForm api={api} onDone={()=>{ setShowAdd(false); reload(); }} onClose={()=>setShowAdd(false)} />
-        </Modal>
-      )}
-      {editWh && (
-        <Modal title="Edit Warehouse" onClose={()=>setEditWh(null)}>
-          <WarehouseForm api={api} warehouse={editWh} onDone={()=>{ setEditWh(null); reload(); }} onClose={()=>setEditWh(null)} />
+          <WarehouseCreateForm api={api} onDone={()=>{ setShowAdd(false); reload(); }} onClose={()=>setShowAdd(false)} />
         </Modal>
       )}
     </div>
   );
 }
-function WarehouseForm({ api, warehouse, onDone, onClose }) {
-  const [name, setName] = useState(warehouse?.name || "");
-  const [location, setLocation] = useState(warehouse?.location || "");
-  const [capacity, setCapacity] = useState(warehouse?.capacity ?? 1000);
+function WarehouseCreateForm({ api, onDone, onClose }) {
+  const [name, setName] = useState("");
+  const [location, setLocation] = useState("");
+  const [capacity, setCapacity] = useState(1000);
   const [error, setError] = useState("");
   async function submit(e) {
     e.preventDefault();
     try {
-      const body = { name, location, capacity: Number(capacity) };
-      if (warehouse) await api.updateWarehouse(warehouse.id, body);
-      else await api.createWarehouse(body);
+      const res = await fetch(`${API_BASE}/warehouses`, { method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${window.__token}`}, body: JSON.stringify({name, location, capacity: Number(capacity)}) });
+      if (!res.ok) throw new Error((await res.json()).error);
       onDone();
     } catch (err) { setError(err.message); }
   }
@@ -778,154 +659,26 @@ function WarehouseForm({ api, warehouse, onDone, onClose }) {
 // ---------------------------------------------------------------------
 // Suppliers page
 // ---------------------------------------------------------------------
-function Suppliers({ api, user, suppliers, reload }) {
-  const [showAdd, setShowAdd] = useState(false);
-  const [editSup, setEditSup] = useState(null);
-  const isAdmin = user.role === "admin";
-
-  async function handleDelete(s) {
-    if (!confirm(`Delete "${s.name}"? This cannot be undone.`)) return;
-    try { await api.deleteSupplier(s.id); reload(); } catch (e) { alert(e.message); }
-  }
-
+function Suppliers({ api, suppliers }) {
   return (
     <div className="fade-in space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Suppliers</h2>
-        {isAdmin && <button onClick={()=>setShowAdd(true)} className="px-4 py-2 rounded-lg text-sm font-medium text-white" style={{ background:"linear-gradient(135deg,#22c55e,#06b6d4)" }}>+ Add Supplier</button>}
-      </div>
+      <h2 className="text-xl font-semibold">Suppliers</h2>
       <div className="glass border border-white/10 rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="text-left text-slate-400 border-b border-white/10">
             <th className="p-3">Name</th><th className="p-3">Email</th><th className="p-3">Phone</th><th className="p-3">Address</th><th className="p-3">Outstanding (€)</th>
-            {isAdmin && <th className="p-3">Actions</th>}
           </tr></thead>
           <tbody>
             {suppliers.map(s=>(
               <tr key={s.id} className="border-b border-white/5">
                 <td className="p-3 font-medium">{s.name}</td><td className="p-3">{s.email}</td><td className="p-3">{s.phone}</td>
                 <td className="p-3">{s.address}</td><td className="p-3">{eur(s.outstandingBalance)}</td>
-                {isAdmin && (
-                  <td className="p-3">
-                    <div className="flex gap-1">
-                      <button onClick={()=>setEditSup(s)} className="px-2 py-1 rounded bg-white/10 text-xs">Edit</button>
-                      <button onClick={()=>handleDelete(s)} className="px-2 py-1 rounded bg-rose-500/15 text-rose-400 text-xs">Del</button>
-                    </div>
-                  </td>
-                )}
               </tr>
             ))}
-            {suppliers.length===0 && <tr><td colSpan={isAdmin?6:5} className="p-6 text-center text-slate-500">No suppliers yet.</td></tr>}
           </tbody>
         </table>
       </div>
-      {showAdd && <Modal title="Add Supplier" onClose={()=>setShowAdd(false)}><SupplierForm api={api} onDone={()=>{setShowAdd(false); reload();}} onClose={()=>setShowAdd(false)} /></Modal>}
-      {editSup && <Modal title="Edit Supplier" onClose={()=>setEditSup(null)}><SupplierForm api={api} supplier={editSup} onDone={()=>{setEditSup(null); reload();}} onClose={()=>setEditSup(null)} /></Modal>}
     </div>
-  );
-}
-function SupplierForm({ api, supplier, onDone, onClose }) {
-  const [form, setForm] = useState(supplier || { name:"", email:"", phone:"", address:"", outstandingBalance:0 });
-  const [error, setError] = useState("");
-  const set = (k,v) => setForm(f=>({...f, [k]:v}));
-  async function submit(e) {
-    e.preventDefault();
-    try {
-      if (supplier) await api.updateSupplier(supplier.id, form);
-      else await api.createSupplier(form);
-      onDone();
-    } catch (err) { setError(err.message); }
-  }
-  return (
-    <form onSubmit={submit}>
-      <Field label="Name"><input required className={inputCls} value={form.name} onChange={e=>set("name", e.target.value)} /></Field>
-      <Field label="Email"><input type="email" className={inputCls} value={form.email} onChange={e=>set("email", e.target.value)} /></Field>
-      <Field label="Phone"><input className={inputCls} value={form.phone} onChange={e=>set("phone", e.target.value)} /></Field>
-      <Field label="Address"><input className={inputCls} value={form.address} onChange={e=>set("address", e.target.value)} /></Field>
-      <Field label="Outstanding Balance (€)"><input type="number" step="0.01" className={inputCls} value={form.outstandingBalance} onChange={e=>set("outstandingBalance", e.target.value)} /></Field>
-      {error && <div className="text-rose-400 text-xs mb-2">{error}</div>}
-      <div className="flex justify-end gap-2 mt-3">
-        <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg bg-white/10 text-sm">Cancel</button>
-        <button className="px-4 py-2 rounded-lg text-sm font-medium text-white" style={{ background: "linear-gradient(135deg,#22c55e,#06b6d4)" }}>Save</button>
-      </div>
-    </form>
-  );
-}
-
-// ---------------------------------------------------------------------
-// Dispatchers page
-// ---------------------------------------------------------------------
-function Dispatchers({ api, user, dispatchers, reload }) {
-  const [showAdd, setShowAdd] = useState(false);
-  const [editDisp, setEditDisp] = useState(null);
-  const isAdmin = user.role === "admin";
-
-  async function handleDelete(d) {
-    if (!confirm(`Delete "${d.name}"? This cannot be undone.`)) return;
-    try { await api.deleteDispatcher(d.id); reload(); } catch (e) { alert(e.message); }
-  }
-
-  return (
-    <div className="fade-in space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Dispatchers</h2>
-        {isAdmin && <button onClick={()=>setShowAdd(true)} className="px-4 py-2 rounded-lg text-sm font-medium text-white" style={{ background:"linear-gradient(135deg,#22c55e,#06b6d4)" }}>+ Add Dispatcher</button>}
-      </div>
-      <div className="glass border border-white/10 rounded-xl overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead><tr className="text-left text-slate-400 border-b border-white/10">
-            <th className="p-3">Name</th><th className="p-3">Phone</th><th className="p-3">Email</th><th className="p-3">Vehicle</th><th className="p-3">Notes</th>
-            {isAdmin && <th className="p-3">Actions</th>}
-          </tr></thead>
-          <tbody>
-            {dispatchers.map(d=>(
-              <tr key={d.id} className="border-b border-white/5">
-                <td className="p-3 font-medium">{d.name}</td><td className="p-3">{d.phone}</td><td className="p-3">{d.email}</td>
-                <td className="p-3">{d.vehicle}</td><td className="p-3 text-slate-400">{d.notes}</td>
-                {isAdmin && (
-                  <td className="p-3">
-                    <div className="flex gap-1">
-                      <button onClick={()=>setEditDisp(d)} className="px-2 py-1 rounded bg-white/10 text-xs">Edit</button>
-                      <button onClick={()=>handleDelete(d)} className="px-2 py-1 rounded bg-rose-500/15 text-rose-400 text-xs">Del</button>
-                    </div>
-                  </td>
-                )}
-              </tr>
-            ))}
-            {dispatchers.length===0 && <tr><td colSpan={isAdmin?6:5} className="p-6 text-center text-slate-500">No dispatchers yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-      {showAdd && <Modal title="Add Dispatcher" onClose={()=>setShowAdd(false)}><DispatcherForm api={api} onDone={()=>{setShowAdd(false); reload();}} onClose={()=>setShowAdd(false)} /></Modal>}
-      {editDisp && <Modal title="Edit Dispatcher" onClose={()=>setEditDisp(null)}><DispatcherForm api={api} dispatcher={editDisp} onDone={()=>{setEditDisp(null); reload();}} onClose={()=>setEditDisp(null)} /></Modal>}
-    </div>
-  );
-}
-function DispatcherForm({ api, dispatcher, onDone, onClose }) {
-  const [form, setForm] = useState(dispatcher || { name:"", phone:"", email:"", vehicle:"", notes:"" });
-  const [error, setError] = useState("");
-  const set = (k,v) => setForm(f=>({...f, [k]:v}));
-  async function submit(e) {
-    e.preventDefault();
-    try {
-      if (dispatcher) await api.updateDispatcher(dispatcher.id, form);
-      else await api.createDispatcher(form);
-      onDone();
-    } catch (err) { setError(err.message); }
-  }
-  return (
-    <form onSubmit={submit}>
-      <Field label="Name"><input required className={inputCls} value={form.name} onChange={e=>set("name", e.target.value)} /></Field>
-      <Field label="Phone"><input className={inputCls} value={form.phone} onChange={e=>set("phone", e.target.value)} /></Field>
-      <Field label="Email"><input type="email" className={inputCls} value={form.email} onChange={e=>set("email", e.target.value)} /></Field>
-      <Field label="Vehicle"><input className={inputCls} value={form.vehicle} onChange={e=>set("vehicle", e.target.value)} /></Field>
-      <Field label="Notes"><textarea className={inputCls} rows="2" value={form.notes} onChange={e=>set("notes", e.target.value)} /></Field>
-      {error && <div className="text-rose-400 text-xs mb-2">{error}</div>}
-      <div className="flex justify-end gap-2 mt-3">
-        <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg bg-white/10 text-sm">Cancel</button>
-        <button className="px-4 py-2 rounded-lg text-sm font-medium text-white" style={{ background: "linear-gradient(135deg,#22c55e,#06b6d4)" }}>Save</button>
-      </div>
-    </form>
   );
 }
 
@@ -948,152 +701,17 @@ function Notifications({ api }) {
 }
 
 // ---------------------------------------------------------------------
-// Transactions ledger — who did what, and when
-// ---------------------------------------------------------------------
-const TX_TYPES = ["stock-in", "stock-out", "sale", "transfer", "damage", "return"];
-function Transactions({ api, warehouses }) {
-  const [list, setList] = useState([]);
-  const [error, setError] = useState("");
-  const [type, setType] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [search, setSearch] = useState("");
-
-  function load() {
-    const qs = [];
-    if (type) qs.push(`type=${encodeURIComponent(type)}`);
-    if (from) qs.push(`from=${from}`);
-    if (to) qs.push(`to=${to}`);
-    qs.push("limit=500");
-    api.transactions(`?${qs.join("&")}`).then(setList).catch(e=>setError(e.message));
-  }
-  useEffect(load, [type, from, to]);
-
-  const filtered = search
-    ? list.filter(t => (t.productName||"").toLowerCase().includes(search.toLowerCase()) || (t.userName||"").toLowerCase().includes(search.toLowerCase()) || (t.customerName||"").toLowerCase().includes(search.toLowerCase()))
-    : list;
-
-  const typeColors = {
-    "stock-in": "bg-emerald-500/15 text-emerald-400", "stock-out": "bg-sky-500/15 text-sky-400",
-    "sale": "bg-teal-500/15 text-teal-300", "transfer": "bg-purple-500/15 text-purple-300",
-    "damage": "bg-orange-500/15 text-orange-300", "return": "bg-fuchsia-500/15 text-fuchsia-300",
-  };
-
-  return (
-    <div className="fade-in space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">Transactions</h2>
-        <div className="flex gap-2 items-center flex-wrap">
-          <input placeholder="Search product / user / customer…" value={search} onChange={e=>setSearch(e.target.value)}
-            className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm w-56" />
-          <select value={type} onChange={e=>setType(e.target.value)} className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm">
-            <option value="">All Types</option>
-            {TX_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
-          </select>
-          <input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm" />
-          <span className="text-slate-500 text-xs">to</span>
-          <input type="date" value={to} onChange={e=>setTo(e.target.value)} className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm" />
-        </div>
-      </div>
-      {error && <ErrorBox msg={error} />}
-      <div className="glass border border-white/10 rounded-xl overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-slate-400 border-b border-white/10">
-              <th className="p-3">Date</th><th className="p-3">Type</th><th className="p-3">Product</th><th className="p-3">Qty</th>
-              <th className="p-3">Price</th><th className="p-3">Customer</th><th className="p-3">Dispatcher</th><th className="p-3">By User</th><th className="p-3">Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(t=>(
-              <tr key={t.id} className="border-b border-white/5 hover:bg-white/[0.03]">
-                <td className="p-3 text-slate-500 whitespace-nowrap">{new Date(t.createdAt).toLocaleString()}</td>
-                <td className="p-3"><span className={`px-2 py-1 rounded-full text-xs font-medium ${typeColors[t.type]||"bg-slate-500/15 text-slate-300"}`}>{t.type}</span></td>
-                <td className="p-3 font-medium">{t.productName}</td>
-                <td className="p-3">{t.quantity}</td>
-                <td className="p-3">{t.price!=null ? eur(t.price) : "—"}</td>
-                <td className="p-3">{t.customerName || "—"}</td>
-                <td className="p-3">{t.dispatcherName || "—"}</td>
-                <td className="p-3 text-emerald-300">{t.userName || "—"}</td>
-                <td className="p-3 text-slate-400">{t.note || "—"}</td>
-              </tr>
-            ))}
-            {filtered.length===0 && <tr><td colSpan="9" className="p-6 text-center text-slate-500">No transactions found for this filter.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------
 // Reports
 // ---------------------------------------------------------------------
-function Reports({ warehouses }) {
-  const [invFrom, setInvFrom] = useState("");
-  const [invTo, setInvTo] = useState("");
-  const [invWarehouse, setInvWarehouse] = useState("");
-  const [txFrom, setTxFrom] = useState("");
-  const [txTo, setTxTo] = useState("");
-  const [txType, setTxType] = useState("");
-
-  function invUrl() {
-    const qs = [];
-    if (invFrom) qs.push(`from=${invFrom}`);
-    if (invTo) qs.push(`to=${invTo}`);
-    if (invWarehouse) qs.push(`warehouseId=${invWarehouse}`);
-    return `${API_BASE}/reports/inventory.csv${qs.length ? `?${qs.join("&")}` : ""}`;
-  }
-  function txUrl() {
-    const qs = [];
-    if (txFrom) qs.push(`from=${txFrom}`);
-    if (txTo) qs.push(`to=${txTo}`);
-    if (txType) qs.push(`type=${txType}`);
-    return `${API_BASE}/reports/transactions.csv${qs.length ? `?${qs.join("&")}` : ""}`;
-  }
-
+function Reports() {
   return (
-    <div className="fade-in space-y-6">
+    <div className="fade-in space-y-4">
       <h2 className="text-xl font-semibold">Reports</h2>
-
-      <div className="glass border border-white/10 rounded-xl p-4 space-y-3">
-        <h3 className="text-sm font-medium text-slate-300">Inventory Report</h3>
-        <div className="flex gap-2 flex-wrap items-end">
-          <Field label="From"><input type="date" className={inputCls} value={invFrom} onChange={e=>setInvFrom(e.target.value)} /></Field>
-          <Field label="To"><input type="date" className={inputCls} value={invTo} onChange={e=>setInvTo(e.target.value)} /></Field>
-          <Field label="Warehouse">
-            <select className={inputCls} value={invWarehouse} onChange={e=>setInvWarehouse(e.target.value)}>
-              <option value="">All Warehouses</option>
-              {(warehouses||[]).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
-            </select>
-          </Field>
-          <a href={invUrl()} target="_blank" className="px-4 py-2 mb-3 rounded-lg glass border border-white/10 hover:border-emerald-400 text-sm">⬇ Download CSV</a>
-        </div>
+      <div className="flex gap-3 flex-wrap">
+        <a href={`${API_BASE}/reports/inventory.csv`} target="_blank" className="px-4 py-3 rounded-lg glass border border-white/10 hover:border-emerald-400 text-sm">⬇ Inventory Report (CSV)</a>
+        <a href={`${API_BASE}/reports/suppliers.csv`} target="_blank" className="px-4 py-3 rounded-lg glass border border-white/10 hover:border-emerald-400 text-sm">⬇ Suppliers Report (CSV)</a>
       </div>
-
-      <div className="glass border border-white/10 rounded-xl p-4 space-y-3">
-        <h3 className="text-sm font-medium text-slate-300">Transactions Report (sales, stock-in/out, transfers…)</h3>
-        <div className="flex gap-2 flex-wrap items-end">
-          <Field label="From"><input type="date" className={inputCls} value={txFrom} onChange={e=>setTxFrom(e.target.value)} /></Field>
-          <Field label="To"><input type="date" className={inputCls} value={txTo} onChange={e=>setTxTo(e.target.value)} /></Field>
-          <Field label="Type">
-            <select className={inputCls} value={txType} onChange={e=>setTxType(e.target.value)}>
-              <option value="">All Types</option>
-              {TX_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
-            </select>
-          </Field>
-          <a href={txUrl()} target="_blank" className="px-4 py-2 mb-3 rounded-lg glass border border-white/10 hover:border-emerald-400 text-sm">⬇ Download CSV</a>
-        </div>
-      </div>
-
-      <div className="glass border border-white/10 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-slate-300 mb-3">Other Reports</h3>
-        <div className="flex gap-3 flex-wrap">
-          <a href={`${API_BASE}/reports/suppliers.csv`} target="_blank" className="px-4 py-3 rounded-lg glass border border-white/10 hover:border-emerald-400 text-sm">⬇ Suppliers Report (CSV)</a>
-        </div>
-      </div>
-
-      <p className="text-xs text-slate-500">Note: CSV downloads require an active session — open in a new tab while logged in on the same browser. To bulk-add products, use "Import CSV" on the Products page.</p>
+      <p className="text-xs text-slate-500">Note: CSV downloads require an active session — open in a new tab while logged in on the same browser.</p>
     </div>
   );
 }
@@ -1106,8 +724,6 @@ const NAV = [
   { key:"products", label:"Products", icon:"📦" },
   { key:"warehouses", label:"Warehouses", icon:"🏬" },
   { key:"suppliers", label:"Suppliers", icon:"🚚" },
-  { key:"dispatchers", label:"Dispatchers", icon:"🛵" },
-  { key:"transactions", label:"Transactions", icon:"📒" },
   { key:"notifications", label:"Notifications", icon:"🔔" },
   { key:"reports", label:"Reports", icon:"📊" },
 ];
@@ -1118,7 +734,6 @@ function App() {
   const [page, setPage] = useState("dashboard");
   const [warehouses, setWarehouses] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
-  const [dispatchers, setDispatchers] = useState([]);
   const [refreshFlag, setRefreshFlag] = useState(0);
   const api = useApi(token);
   const inviteToken = new URLSearchParams(window.location.search).get("invite");
@@ -1129,7 +744,6 @@ function App() {
     if (!token) return;
     api.warehouses().then(setWarehouses).catch(()=>{});
     api.suppliers().then(setSuppliers).catch(()=>{});
-    api.dispatchers().then(setDispatchers).catch(()=>{});
   }, [token, refreshFlag]);
 
   function handleLogin(t, u) { setToken(t); setUser(u); }
@@ -1172,13 +786,11 @@ function App() {
 
       <main className="flex-1 p-6 overflow-y-auto max-h-screen">
         {page === "dashboard" && <Dashboard api={api} />}
-        {page === "products" && <Products api={api} user={user} warehouses={warehouses} suppliers={suppliers} dispatchers={dispatchers} refreshFlag={refreshFlag} bump={bump} />}
+        {page === "products" && <Products api={api} user={user} warehouses={warehouses} suppliers={suppliers} refreshFlag={refreshFlag} bump={bump} />}
         {page === "warehouses" && <Warehouses api={api} user={user} warehouses={warehouses} reload={bump} />}
-        {page === "suppliers" && <Suppliers api={api} user={user} suppliers={suppliers} reload={bump} />}
-        {page === "dispatchers" && <Dispatchers api={api} user={user} dispatchers={dispatchers} reload={bump} />}
-        {page === "transactions" && <Transactions api={api} warehouses={warehouses} />}
+        {page === "suppliers" && <Suppliers api={api} suppliers={suppliers} />}
         {page === "notifications" && <Notifications api={api} />}
-        {page === "reports" && <Reports warehouses={warehouses} />}
+        {page === "reports" && <Reports />}
         {page === "users" && user.role === "admin" && <UsersPage api={api} token={token} />}
       </main>
     </div>
